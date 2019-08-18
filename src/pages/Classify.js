@@ -1,5 +1,7 @@
 import React, { Component, Fragment } from 'react';
-import { Button, Collapse, Form, Spinner, ListGroup, Tabs, Tab } from 'react-bootstrap';
+import {
+  Alert, Button, Collapse, Container, Form, Spinner, ListGroup, Tabs, Tab
+} from 'react-bootstrap';
 import { FaCamera, FaChevronDown, FaChevronRight } from 'react-icons/fa';
 import { openDB } from 'idb';
 import Cropper  from 'react-cropper';
@@ -17,7 +19,7 @@ const CANVAS_SIZE = 128;
 const TOPK_PREDICTIONS = 5;
 
 const INDEXEDDB_DB = 'tensorflowjs';
-const INDEXEDDB_STORE = 'model_info_store'
+const INDEXEDDB_STORE = 'model_info_store';
 const INDEXEDDB_KEY = 'web-model';
 
 /**
@@ -39,7 +41,11 @@ export default class Classify extends Component {
       isModelLoading: false,
       isClassifying: false,
       predictions: [],
-      photoSettingsOpen: true
+      photoSettingsOpen: true,
+      modelUpdateAvailable: false,
+      showModelUpdateAlert: false,
+      showModelUpdateSuccess: false,
+      isDownloadingModel: false
     };
   }
 
@@ -52,7 +58,9 @@ export default class Classify extends Component {
         // Get the date when the model was saved.
         try {
           const db = await openDB(INDEXEDDB_DB, 1, );
-          const item = await db.transaction(INDEXEDDB_STORE).objectStore(INDEXEDDB_STORE).get(INDEXEDDB_KEY);
+          const item = await db.transaction(INDEXEDDB_STORE)
+                               .objectStore(INDEXEDDB_STORE)
+                               .get(INDEXEDDB_KEY);
           const dateSaved = new Date(item.modelArtifactsInfo.dateSaved);
           await this.getModelInfo();
           console.log(this.modelLastUpdated);
@@ -60,16 +68,16 @@ export default class Classify extends Component {
             console.log('Using saved model');
           }
           else {
-            // There is a newer model available. Refresh the one saved in IndexedDB.
-            console.log('Saved model is out of date. Updating...');
-            this.model = await tf.loadLayersModel(MODEL_PATH);
-            await this.model.save('indexeddb://' + INDEXEDDB_KEY);
+            this.setState({
+              modelUpdateAvailable: true,
+              showModelUpdateAlert: true,
+            });
           }
 
         }
         catch (error) {
           console.warn(error);
-          console.warn('Could not retrieve when model was saved.')
+          console.warn('Could not retrieve when model was saved.');
         }
 
       }
@@ -105,14 +113,16 @@ export default class Classify extends Component {
     try {
       this.model.dispose();
     }
-    catch (e) {}
+    catch (e) {
+      // Assume model is not loaded or already disposed.
+    }
   }
 
   initWebcam = async () => {
     try {
       this.webcam = await tf.data.webcam(
         this.refs.webcam,
-        {resizeWidth: IMAGE_SIZE, resizeHeight: IMAGE_SIZE, facingMode: 'environment'}
+        {resizeWidth: CANVAS_SIZE, resizeHeight: CANVAS_SIZE, facingMode: 'environment'}
       );
     }
     catch (e) {
@@ -149,6 +159,20 @@ export default class Classify extends Component {
     });
   }
 
+  updateModel = async () => {
+    // Get the latest model from the server and refresh the one saved in IndexedDB.
+    console.log('Updating the model: ' + INDEXEDDB_KEY);
+    this.setState({ isDownloadingModel: true });
+    this.model = await tf.loadLayersModel(MODEL_PATH);
+    await this.model.save('indexeddb://' + INDEXEDDB_KEY);
+    this.setState({
+      isDownloadingModel: false,
+      modelUpdateAvailable: false,
+      showModelUpdateAlert: false,
+      showModelUpdateSuccess: true
+    });
+  }
+
   classifyLocalImage = async () => {
     this.setState({ isClassifying: true });
 
@@ -170,13 +194,13 @@ export default class Classify extends Component {
     });
 
     // Draw thumbnail to UI.
-    const context = this.refs.canvas.getContext("2d");
+    const context = this.refs.canvas.getContext('2d');
     const ratioX = CANVAS_SIZE / croppedCanvas.width;
     const ratioY = CANVAS_SIZE / croppedCanvas.height;
     const ratio = Math.min(ratioX, ratioY);
     context.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
     context.drawImage(croppedCanvas, 0, 0,
-                      croppedCanvas.width * ratio, croppedCanvas.height * ratio)
+                      croppedCanvas.width * ratio, croppedCanvas.height * ratio);
 
     // Dispose of tensors we are finished with.
     image.dispose();
@@ -190,7 +214,8 @@ export default class Classify extends Component {
 
     const imageCapture = await this.webcam.capture();
 
-    const imageData = await this.processImage(imageCapture);
+    const resized = tf.image.resizeBilinear(imageCapture, [IMAGE_SIZE, IMAGE_SIZE]);
+    const imageData = await this.processImage(resized);
     const logits = this.model.predict(imageData);
     const probabilities = await logits.data();
     const preds = await this.getTopKClasses(probabilities, TOPK_PREDICTIONS);
@@ -202,8 +227,7 @@ export default class Classify extends Component {
     });
 
     // Draw thumbnail to UI.
-    const resized = tf.image.resizeBilinear(imageCapture, [CANVAS_SIZE, CANVAS_SIZE]);
-    const tensorData = tf.tidy(() => resized.toFloat().div(255));
+    const tensorData = tf.tidy(() => imageCapture.toFloat().div(255));
     await tf.browser.toPixels(tensorData, this.refs.canvas);
 
     // Dispose of tensors we are finished with.
@@ -244,7 +268,7 @@ export default class Classify extends Component {
       topClassesAndProbs.push({
         className: MODEL_CLASSES[topkIndices[i]],
         probability: (topkValues[i] * 100).toFixed(2)
-      })
+      });
     }
     return topClassesAndProbs;
   }
@@ -268,6 +292,7 @@ export default class Classify extends Component {
         this.startWebcam();
         break;
       case 'localfile':
+        this.setState({filename: null, file: null});
         this.stopWebcam();
         break;
       default:
@@ -305,6 +330,42 @@ export default class Classify extends Component {
           </Button>
           <Collapse in={this.state.photoSettingsOpen}>
             <div id="photo-selection-pane">
+            { this.state.modelUpdateAvailable && this.state.showModelUpdateAlert &&
+                <Container>
+                  <Alert
+                    variant="info"
+                    show={this.state.modelUpdateAvailable && this.state.showModelUpdateAlert}
+                    onClose={() => this.setState({ showModelUpdateAlert: false})}
+                    dismissible>
+                      An update for the <strong>{this.state.modelType}</strong> model is available.
+                      <div className="d-flex justify-content-center pt-1">
+                        {!this.state.isDownloadingModel &&
+                          <Button onClick={this.updateModel}
+                                  variant="outline-info">
+                            Update
+                          </Button>
+                        }
+                        {this.state.isDownloadingModel &&
+                          <div>
+                            <Spinner animation="border" role="status" size="sm">
+                              <span className="sr-only">Downloading...</span>
+                            </Spinner>
+                            {' '}<strong>Downloading...</strong>
+                          </div>
+                        }
+                      </div>
+                  </Alert>
+                </Container>
+              }
+              {this.state.showModelUpdateSuccess &&
+                <Container>
+                  <Alert variant="success"
+                         onClose={() => this.setState({ showModelUpdateSuccess: false})}
+                         dismissible>
+                    The <strong>{this.state.modelType}</strong> model has been updated!
+                  </Alert>
+                </Container>
+              }
             <Tabs defaultActiveKey="camera" id="input-options" onSelect={this.handleTabSelect}
                   className="justify-content-center">
               <Tab eventKey="camera" title="Take Photo">
@@ -349,7 +410,7 @@ export default class Classify extends Component {
                       <Cropper
                         ref="cropper"
                         src={this.state.file}
-                        style={{height: 400, width: "100%"}}
+                        style={{height: 400, width: '100%'}}
                         guides={true}
                         viewMode={2}
                       />
